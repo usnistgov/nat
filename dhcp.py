@@ -7,12 +7,17 @@ from ryu.base import app_manager
 from ryu.lib.packet import dhcp, udp, ipv4, ethernet
 from ryu.controller.handler import set_ev_cls
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.lib.packet import packet
 from ryu.lib import addrconv
 
 from helper import ofp_helper
 from models import settings
+
+from dpkt.dhcp import DHCP
+
+import pdb
+import array
 
 
 class SimpleDHCPServer(app_manager.RyuApp):
@@ -55,16 +60,36 @@ class SimpleDHCPServer(app_manager.RyuApp):
         self.ip_pool_list.remove(self.gw_addr)
         self.ip_pool_list.remove(self.broadcast_addr)
         self.ip_pool_list.remove(self.ip_network[0])
+        print "Done initializing"
+
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # install the table-miss flow entry.
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
+                                         
+        ofp_helper.add_flow(datapath, 0, match, actions)
+        # send 1024 bytes to me (default is 256 - does not work for some dhcp requests).
+        req = parser.OFPSetConfig(datapath, ofproto_v1_3.OFPC_FRAG_NORMAL, 1024)
+        datapath.send_msg(req)
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        print "Got a packet "
         msg = ev.msg
         datapath = msg.datapath
         # ofproto = datapath.ofproto
         in_port = msg.match['in_port']
 
         pkt = packet.Packet(msg.data)
+
         dhcpPacket = pkt.get_protocol(dhcp.dhcp)
+        #pdb.set_trace()
+        #dhcpPacket = dhcp.dhcp.parser(pkt[3])[0]
 
         if not dhcpPacket:
             return
@@ -87,6 +112,7 @@ class SimpleDHCPServer(app_manager.RyuApp):
                 pass
 
     def handle_dhcp_discover(self, dhcp_pkt, datapath, port):
+        print "dchp_discover"
         try:
             # Choose a IP form IP pool list
             client_ip_addr = str(self.ip_pool_list.pop())
@@ -95,6 +121,7 @@ class SimpleDHCPServer(app_manager.RyuApp):
             self.logger.info("EMPTY IP POOL")
             return
 
+        print "sending dhcp_offer"
         # send dhcp_offer message.
         dhcp_offer_msg_type = '\x02'
         self.logger.info("Send DHCP message type %s" %
@@ -116,6 +143,9 @@ class SimpleDHCPServer(app_manager.RyuApp):
         self._send_dhcp_packet(datapath, dhcp_pkt, port)
 
     def handle_dhcp_request(self, dhcp_pkt, datapath, port):
+        if not dhcp_pkt.chaddr in self.mac_to_client_ip:
+            self.logger.info("DHCP discover not seen -- returning ")
+            return
         # send dhcp_ack message.
         dhcp_ack_msg_type = '\x05'
         self.logger.info("Send DHCP message type %s" %
